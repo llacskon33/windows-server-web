@@ -1,0 +1,60 @@
+name: Windows Server web
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "Minutos que se mantiene abierto Windows (máx. 120)"
+        required: false
+        default: "60"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 125
+    steps:
+      - name: Instalar TightVNC (servidor VNC)
+        id: vnc
+        shell: pwsh
+        run: |
+          $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
+          $pass = -join (1..8 | ForEach-Object { $chars[(Get-Random -Minimum 0 -Maximum $chars.Length)] })
+          choco install tightvnc -y --no-progress --install-arguments="'SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD=$pass SET_USECONTROLAUTHENTICATION=1 VALUE_OF_USECONTROLAUTHENTICATION=1 SET_CONTROLPASSWORD=1 VALUE_OF_CONTROLPASSWORD=$pass'"
+          "pass=$pass" >> $env:GITHUB_OUTPUT
+          Start-Sleep -Seconds 5
+          Get-Service | Where-Object { $_.Name -like '*vnc*' } | Format-Table -AutoSize
+
+      - name: Abrir Windows en el navegador (noVNC + túnel)
+        shell: pwsh
+        env:
+          MINUTES: ${{ inputs.minutes }}
+          VNC_PASS: ${{ steps.vnc.outputs.pass }}
+        run: |
+          $m = 60
+          if ($env:MINUTES -match '^\d+$') { $m = [int]$env:MINUTES }
+          if ($m -gt 120) { $m = 120 }
+          if ($m -lt 1) { $m = 1 }
+
+          python -m pip install --quiet websockify
+          Invoke-WebRequest -Uri https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip -OutFile novnc.zip
+          Expand-Archive novnc.zip -DestinationPath .
+          Start-Process python -ArgumentList '-m','websockify','--web','noVNC-1.5.0','6080','localhost:5900' -WindowStyle Hidden
+
+          Invoke-WebRequest -Uri https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile cloudflared.exe
+          Start-Process .\cloudflared.exe -ArgumentList 'tunnel','--url','http://localhost:6080','--no-autoupdate' -RedirectStandardError cf.log -WindowStyle Hidden
+
+          $url = $null
+          for ($i = 0; $i -lt 40; $i++) {
+            Start-Sleep -Seconds 3
+            $txt = Get-Content cf.log -Raw -ErrorAction SilentlyContinue
+            if ($txt -match 'https://[a-z0-9-]+\.trycloudflare\.com') { $url = $Matches[0]; break }
+          }
+          if (-not $url) { Get-Content cf.log -ErrorAction SilentlyContinue; throw "No se pudo abrir el tunel" }
+
+          Write-Host "::notice title=WINDOWS::WINDOWS_URL=$url PASS=$($env:VNC_PASS)"
+          Write-Host "Windows abierto durante $m minutos: $url (contrasena VNC: $($env:VNC_PASS))"
+          Start-Sleep -Seconds ($m * 60)
