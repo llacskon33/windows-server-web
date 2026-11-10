@@ -8,6 +8,10 @@ on:
         required: false
         default: "60"
         type: string
+      pubkey:
+        description: "Clave publica (RSA) para cifrar la contrasena de VNC"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -23,21 +27,30 @@ jobs:
         run: |
           $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
           $pass = -join (1..8 | ForEach-Object { $chars[(Get-Random -Minimum 0 -Maximum $chars.Length)] })
+          Write-Host "::add-mask::$pass"
           choco install tightvnc -y --no-progress --install-arguments="'SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD=$pass SET_USECONTROLAUTHENTICATION=1 VALUE_OF_USECONTROLAUTHENTICATION=1 SET_CONTROLPASSWORD=1 VALUE_OF_CONTROLPASSWORD=$pass'"
           "pass=$pass" >> $env:GITHUB_OUTPUT
           Start-Sleep -Seconds 5
+          Start-Service tvnserver -ErrorAction SilentlyContinue
           Get-Service | Where-Object { $_.Name -like '*vnc*' } | Format-Table -AutoSize
 
       - name: Abrir Windows en el navegador (noVNC + túnel)
         shell: pwsh
         env:
           MINUTES: ${{ inputs.minutes }}
+          PUBKEY: ${{ inputs.pubkey }}
           VNC_PASS: ${{ steps.vnc.outputs.pass }}
         run: |
+          Write-Host "::add-mask::$($env:VNC_PASS)"
           $m = 60
           if ($env:MINUTES -match '^\d+$') { $m = [int]$env:MINUTES }
           if ($m -gt 120) { $m = 120 }
           if ($m -lt 1) { $m = 1 }
+
+          $n = 0
+          $rsa = [System.Security.Cryptography.RSA]::Create()
+          $rsa.ImportSubjectPublicKeyInfo([Convert]::FromBase64String($env:PUBKEY), [ref]$n)
+          $enc = [Convert]::ToBase64String($rsa.Encrypt([Text.Encoding]::UTF8.GetBytes($env:VNC_PASS), [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256))
 
           python -m pip install --quiet websockify
           Invoke-WebRequest -Uri https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip -OutFile novnc.zip
@@ -45,7 +58,7 @@ jobs:
           Start-Process python -ArgumentList '-m','websockify','--web','noVNC-1.5.0','6080','localhost:5900' -WindowStyle Hidden
 
           Invoke-WebRequest -Uri https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile cloudflared.exe
-          Start-Process .\cloudflared.exe -ArgumentList 'tunnel','--url','http://localhost:6080','--no-autoupdate' -RedirectStandardError cf.log -WindowStyle Hidden
+          Start-Process .\cloudflared.exe -ArgumentList 'tunnel','--url','http://localhost:6080','--no-autoupdate','--logfile','cf.log' -WindowStyle Hidden
 
           $url = $null
           for ($i = 0; $i -lt 40; $i++) {
@@ -55,6 +68,6 @@ jobs:
           }
           if (-not $url) { Get-Content cf.log -ErrorAction SilentlyContinue; throw "No se pudo abrir el tunel" }
 
-          Write-Host "::notice title=WINDOWS::WINDOWS_URL=$url PASS=$($env:VNC_PASS)"
-          Write-Host "Windows abierto durante $m minutos: $url (contrasena VNC: $($env:VNC_PASS))"
+          Write-Host "::notice title=WINDOWS::WINDOWS_URL=$url ENC=$enc"
+          Write-Host "Windows abierto durante $m minutos: $url"
           Start-Sleep -Seconds ($m * 60)
