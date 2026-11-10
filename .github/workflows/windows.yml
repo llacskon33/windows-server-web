@@ -14,7 +14,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   windows:
@@ -40,6 +40,7 @@ jobs:
           MINUTES: ${{ inputs.minutes }}
           PUBKEY: ${{ inputs.pubkey }}
           VNC_PASS: ${{ steps.vnc.outputs.pass }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           Write-Host "::add-mask::$($env:VNC_PASS)"
           $m = 60
@@ -69,5 +70,11 @@ jobs:
           if (-not $url) { Get-Content cf.log -ErrorAction SilentlyContinue; throw "No se pudo abrir el tunel" }
 
           Write-Host "::notice title=WINDOWS::WINDOWS_URL=$url ENC=$enc"
+          try {
+            $body = @{ message = "ticket"; content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("WINDOWS_URL=$url ENC=$enc")) } | ConvertTo-Json
+            $api = "https://api.github.com/repos/$($env:GITHUB_REPOSITORY)/contents/tickets/run-$($env:GITHUB_RUN_ID).txt"
+            Invoke-RestMethod -Method Put -Uri $api -Headers @{ Authorization = "Bearer $($env:GH_TOKEN)"; Accept = "application/vnd.github+json" } -Body $body -ContentType "application/json" | Out-Null
+            Write-Host "Ticket publicado."
+          } catch { Write-Host "No se pudo publicar el ticket: $($_.Exception.Message)" }
           Write-Host "Windows abierto durante $m minutos: $url"
           Start-Sleep -Seconds ($m * 60)
