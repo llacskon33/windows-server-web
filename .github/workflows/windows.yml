@@ -31,7 +31,10 @@ jobs:
           choco install tightvnc -y --no-progress --install-arguments="'SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD=$pass SET_USECONTROLAUTHENTICATION=1 VALUE_OF_USECONTROLAUTHENTICATION=1 SET_CONTROLPASSWORD=1 VALUE_OF_CONTROLPASSWORD=$pass'"
           "pass=$pass" >> $env:GITHUB_OUTPUT
           Start-Sleep -Seconds 5
-          Start-Service tvnserver -ErrorAction SilentlyContinue
+          New-Item -Path 'HKLM:\SOFTWARE\TightVNC\Server' -Force | Out-Null
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\TightVNC\Server' -Name AllowLoopback -Value 1 -Type DWord
+          Restart-Service tvnserver -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 3
           Get-Service | Where-Object { $_.Name -like '*vnc*' } | Format-Table -AutoSize
 
       - name: Abrir Windows en el navegador (noVNC + túnel)
