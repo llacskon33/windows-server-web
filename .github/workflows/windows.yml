@@ -110,9 +110,14 @@ jobs:
           if ($m -lt 1) { $m = 1 }
 
           python -m pip install --quiet websockify
+
+          # TightVNC rechaza las conexiones que vienen de 127.0.0.1, asi que websockify conecta a la IP propia de la maquina
+          $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1).IPAddress
+          if (-not $ip) { $ip = '127.0.0.1' }
+          Write-Host ('IP usada para VNC: ' + $ip)
           Invoke-WebRequest -Uri https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip -OutFile novnc.zip
           Expand-Archive novnc.zip -DestinationPath .
-          Start-Process python -ArgumentList '-m','websockify','--web','noVNC-1.5.0','6080','127.0.0.1:5900' -RedirectStandardError ws.log -WindowStyle Hidden
+          Start-Process python -ArgumentList '-m','websockify','--web','noVNC-1.5.0','6080',($ip + ':5900') -RedirectStandardError ws.log -WindowStyle Hidden
 
           # Comprobar que websockify sirve noVNC y que el servidor VNC contesta con su saludo RFB
           $web = $false
@@ -121,7 +126,7 @@ jobs:
             try { $r = Invoke-WebRequest -Uri http://127.0.0.1:6080/vnc.html -UseBasicParsing -TimeoutSec 5; if ($r.StatusCode -eq 200) { $web = $true } } catch { }
           }
           if (-not $web) { Get-Content ws.log -ErrorAction SilentlyContinue; throw "noVNC/websockify no responde en el puerto 6080" }
-          $c = New-Object Net.Sockets.TcpClient('127.0.0.1', 5900)
+          $c = New-Object Net.Sockets.TcpClient($ip, 5900)
           $buf = New-Object byte[] 12
           $c.ReceiveTimeout = 5000
           $n = 0
@@ -129,7 +134,7 @@ jobs:
           $c.Close()
           $banner = [Text.Encoding]::ASCII.GetString($buf, 0, $n).Trim()
           Write-Host ('Saludo del servidor VNC: ' + $banner)
-          if (-not $banner.StartsWith('RFB')) { throw "El servidor VNC no contesta: esta rechazando las conexiones locales" }
+          if (-not $banner.StartsWith('RFB')) { throw "El servidor VNC no contesta en $ip (rechaza las conexiones locales)" }
 
           Invoke-WebRequest -Uri https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile cloudflared.exe
           Start-Process .\cloudflared.exe -ArgumentList 'tunnel','--url','http://localhost:6080','--no-autoupdate','--protocol','http2' -RedirectStandardError cf.log -WindowStyle Hidden
