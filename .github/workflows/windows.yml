@@ -87,6 +87,15 @@ jobs:
           }
           Write-Host "TightVNC escuchando en el puerto 5900"
 
+          # Por defecto TightVNC rechaza las conexiones desde 127.0.0.1 (desde donde conecta websockify)
+          foreach ($reg in @('HKLM:\SOFTWARE\TightVNC\Server', 'HKLM:\SOFTWARE\WOW6432Node\TightVNC\Server')) {
+            if (-not (Test-Path $reg)) { New-Item -Path $reg -Force | Out-Null }
+            New-ItemProperty -Path $reg -Name AllowLoopback -Value 1 -PropertyType DWord -Force | Out-Null
+            New-ItemProperty -Path $reg -Name LoopbackOnly -Value 0 -PropertyType DWord -Force | Out-Null
+          }
+          foreach ($s in (Get-Service | Where-Object { $_.Name -like '*vnc*' })) { Restart-Service $s.Name -Force -ErrorAction SilentlyContinue }
+          Start-Sleep -Seconds 6
+
       - name: Abrir Windows en el navegador (noVNC + túnel)
         if: inputs.mode != 'anydesk'
         shell: pwsh
@@ -114,9 +123,13 @@ jobs:
           if (-not $web) { Get-Content ws.log -ErrorAction SilentlyContinue; throw "noVNC/websockify no responde en el puerto 6080" }
           $c = New-Object Net.Sockets.TcpClient('127.0.0.1', 5900)
           $buf = New-Object byte[] 12
-          $n = $c.GetStream().Read($buf, 0, 12)
+          $c.ReceiveTimeout = 5000
+          $n = 0
+          try { $n = $c.GetStream().Read($buf, 0, 12) } catch { }
           $c.Close()
-          Write-Host ('Saludo del servidor VNC: ' + [Text.Encoding]::ASCII.GetString($buf, 0, $n).Trim())
+          $banner = [Text.Encoding]::ASCII.GetString($buf, 0, $n).Trim()
+          Write-Host ('Saludo del servidor VNC: ' + $banner)
+          if (-not $banner.StartsWith('RFB')) { throw "El servidor VNC no contesta: esta rechazando las conexiones locales" }
 
           Invoke-WebRequest -Uri https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile cloudflared.exe
           Start-Process .\cloudflared.exe -ArgumentList 'tunnel','--url','http://localhost:6080','--no-autoupdate','--protocol','http2' -RedirectStandardError cf.log -WindowStyle Hidden
