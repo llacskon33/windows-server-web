@@ -8,16 +8,61 @@ on:
         required: false
         default: "60"
         type: string
+      mode:
+        description: "vnc (navegador) o anydesk"
+        required: false
+        default: "vnc"
+        type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   windows:
     runs-on: windows-2022
     timeout-minutes: 125
     steps:
+      - name: Instalar AnyDesk y abrir acceso
+        if: inputs.mode == 'anydesk'
+        shell: pwsh
+        env:
+          MINUTES: ${{ inputs.minutes }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $m = 60
+          if ($env:MINUTES -match '^\d+$') { $m = [int]$env:MINUTES }
+          if ($m -gt 120) { $m = 120 }
+          if ($m -lt 1) { $m = 1 }
+
+          $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
+          $pass = -join (1..12 | ForEach-Object { $chars[(Get-Random -Minimum 0 -Maximum $chars.Length)] })
+
+          $dir = 'C:\AnyDesk'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Invoke-WebRequest -Uri https://download.anydesk.com/AnyDesk.exe -OutFile "$dir\AnyDesk.exe"
+          $exe = "$dir\AnyDesk.exe"
+          Start-Process $exe -ArgumentList '--install C:\AnyDesk --start-with-win --silent' -Wait
+          Start-Sleep -Seconds 8
+          cmd /c "echo $pass | $exe --set-password"
+          Start-Process $exe
+          Start-Sleep -Seconds 10
+
+          $id = ''
+          for ($i = 0; $i -lt 20 -and -not ($id -match '^\d+$'); $i++) {
+            $id = ((& $exe --get-id | Out-String)).Trim()
+            if (-not ($id -match '^\d+$')) { Start-Sleep -Seconds 3 }
+          }
+          if (-not ($id -match '^\d+$')) { throw "No se pudo obtener el ID de AnyDesk" }
+
+          Write-Host "::notice title=WINDOWS::ANYDESK_ID=$id PASS=$pass"
+          $json = @{ type = 'anydesk'; id = $id; pass = $pass } | ConvertTo-Json -Compress
+          $body = @{ message = 'sesion'; content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)) } | ConvertTo-Json
+          Invoke-RestMethod -Method Put -Uri ('https://api.github.com/repos/' + $env:GITHUB_REPOSITORY + '/contents/session-' + $env:GITHUB_RUN_ID + '.json') -Headers @{ Authorization = ('Bearer ' + $env:GH_TOKEN); Accept = 'application/vnd.github+json' } -Body $body -ContentType 'application/json' | Out-Null
+          Write-Host "AnyDesk abierto durante $m minutos. ID: $id  Contrasena: $pass"
+          Start-Sleep -Seconds ($m * 60)
+
       - name: Instalar TightVNC (servidor VNC)
+        if: inputs.mode != 'anydesk'
         id: vnc
         shell: pwsh
         run: |
@@ -29,10 +74,12 @@ jobs:
           Get-Service | Where-Object { $_.Name -like '*vnc*' } | Format-Table -AutoSize
 
       - name: Abrir Windows en el navegador (noVNC + túnel)
+        if: inputs.mode != 'anydesk'
         shell: pwsh
         env:
           MINUTES: ${{ inputs.minutes }}
           VNC_PASS: ${{ steps.vnc.outputs.pass }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           $m = 60
           if ($env:MINUTES -match '^\d+$') { $m = [int]$env:MINUTES }
@@ -56,5 +103,8 @@ jobs:
           if (-not $url) { Get-Content cf.log -ErrorAction SilentlyContinue; throw "No se pudo abrir el tunel" }
 
           Write-Host "::notice title=WINDOWS::WINDOWS_URL=$url PASS=$($env:VNC_PASS)"
+          $json = @{ type = 'vnc'; url = $url; pass = $env:VNC_PASS } | ConvertTo-Json -Compress
+          $body = @{ message = 'sesion'; content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)) } | ConvertTo-Json
+          Invoke-RestMethod -Method Put -Uri ('https://api.github.com/repos/' + $env:GITHUB_REPOSITORY + '/contents/session-' + $env:GITHUB_RUN_ID + '.json') -Headers @{ Authorization = ('Bearer ' + $env:GH_TOKEN); Accept = 'application/vnd.github+json' } -Body $body -ContentType 'application/json' | Out-Null
           Write-Host "Windows abierto durante $m minutos: $url (contrasena VNC: $($env:VNC_PASS))"
           Start-Sleep -Seconds ($m * 60)
